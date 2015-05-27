@@ -32,6 +32,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #define PROG_NAME "OMAP Loader"
 #define VERSION "1.0.0"
 
+#define min(x, y) ( (x) > (y) ? (y) : (x))
+
 #if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
 # define OMAP_IS_BIG_ENDIAN
 #endif
@@ -58,6 +60,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 /* TODO: dynamically discover these endpoints */
 #define OMAP_USB_BULK_IN 0x81
 #define OMAP_USB_BULK_OUT 0x01
+#define OMAP_USB_INTERFACE 0
 #define OMAP_ASIC_ID_LEN 69
 
 #ifdef OMAP_IS_BIG_ENDIAN
@@ -81,7 +84,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 /* USB transfer characteristics */
 #define USB_MAX_WAIT 5000
-#define USB_TIMEOUT 1000
+#define USB_TIMEOUT 2500
 #define USB_MAX_TIMEOUTS (USB_MAX_WAIT/USB_TIMEOUT)
 
 /* Datatypes
@@ -106,10 +109,11 @@ struct arg_state
   uint16_t vendor, product;
 };
 
-/* Datatypes
+/* Globals
  */
 
-static int g_verbose = 0; 
+static int g_verbose = 0;
+static int g_debug = 0;
 
 /* Function Prototypes
  */
@@ -117,6 +121,10 @@ static int g_verbose = 0;
 /* Poll for a USB device matching vendor:product and return the open handle */
 libusb_device_handle *
 omap_usb_open(libusb_context * ctx, uint16_t vendor, uint16_t product);
+
+/* USB device pretty-printer for debugging */
+void
+omap_usb_print_device_info(libusb_device * device);
 
 /* Grab the string from the specified index. Returns dynamic memory
  * which is caller freed */
@@ -146,6 +154,7 @@ void usage(char * exe);
 
 void log_error(char * fmt, ...);
 void log_info(char * fmt, ...);
+void log_debug(char * fmt, ...);
 
 /* Function Declarations
  */
@@ -183,12 +192,22 @@ omap_usb_open(libusb_context * ctx, uint16_t vendor, uint16_t product)
 
       if(desc.idVendor == vendor && desc.idProduct == product)
       {
+        /* don't rush to open the USB device
+           Let the processor settle */
+        usleep(250000);
+
         if((ret = libusb_open(devlist[i], &handle)) < 0)
         {
           log_error("failed to open USB device %04hx:%04hx: %s\n",
               vendor, product, libusb_error_name(ret));
           libusb_free_device_list(devlist, 1);
           return NULL;
+        }
+
+        /* print out information regarding the USB device */
+        if(g_debug)
+        {
+          omap_usb_print_device_info(devlist[i]);
         }
 
         found = true;
@@ -202,6 +221,30 @@ omap_usb_open(libusb_context * ctx, uint16_t vendor, uint16_t product)
     /* nothing found yet. have a 10ms nap */
     if(!found)
       usleep(10000);
+  }
+
+  int config;
+  if(libusb_get_configuration(handle, &config) == LIBUSB_SUCCESS)
+  {
+    libusb_set_configuration(handle, config);
+    log_debug("using configuration %d\n", config);
+  }
+
+  if(libusb_set_auto_detach_kernel_driver(handle, true) == LIBUSB_SUCCESS)
+  {
+    if(g_debug)
+      log_debug("auto detaching kernel driver on interface claim\n");
+  }
+
+  if((ret = libusb_claim_interface(handle, 0)) < 0)
+  {
+    log_error("WARNING: failed to claim the primary interface before data transfer\n");
+    log_error("Unknown errors may occur. Proceeding anyways...\n");
+  }
+  else
+  {
+    if(g_debug)
+      log_debug("interface successfully claimed\n");
   }
 
   /* grab the manufacturer and product strings for printing */
@@ -225,6 +268,85 @@ omap_usb_open(libusb_context * ctx, uint16_t vendor, uint16_t product)
   fprintf(stdout, ")\n");
 
   return handle;
+}
+
+void
+omap_usb_print_device_info(libusb_device * device)
+{
+  if(!device)
+    return;
+
+  struct libusb_device_descriptor desc;
+  struct libusb_config_descriptor * config = NULL;
+
+  size_t i, j, k, l;
+  int ret;
+
+  if((ret = libusb_get_device_descriptor(device, &desc)) < 0) {
+    log_error("failed to get USB device descriptor: %s\n",
+        libusb_error_name(ret));
+    return;
+  }
+
+  /* list all of the configurations and their endpoints */
+
+  log_debug("USB device %04hx:%04hx info\n", desc.idVendor, desc.idProduct);
+  log_debug("USB BCD 0x%04hx\n", desc.bcdUSB);
+  log_debug("Endpoint 0 Max Pkt Size %hhu\n", desc.bMaxPacketSize0);
+  log_debug("Number of configurations: %hhu\n", desc.bNumConfigurations);
+
+  for(i = 0; i < desc.bNumConfigurations; i++)
+  {
+    if((ret = libusb_get_config_descriptor(device, i, &config)) < 0) {
+      log_error("failed to get data for USB configuration %u\n", i);
+
+      if(config) /* free any left over config */
+      {
+        libusb_free_config_descriptor(config);
+        return;
+      }
+    }
+
+    log_debug("Configuration Descriptor %u\n", i);
+    log_debug("Interfaces %hhu\n", config->bNumInterfaces);
+
+    /* for each of the current configuration's interfaces */
+    for(j = 0; j < config->bNumInterfaces; j++)
+    {
+      const struct libusb_interface * iFace = &config->interface[j];
+
+      log_debug("Interface Descriptor %u\n", j);
+
+      for(k = 0; k < iFace->num_altsetting; k++)
+      {
+        const struct libusb_interface_descriptor * iDesc = &iFace->altsetting[k];
+        log_debug("Alternate Setting %u\n", k);
+      }
+    }
+
+/*for(int j=0; j<inter->num_altsetting; j++) {
+53
+            interdesc = &inter->altsetting[j];
+54
+            cout<<"Interface Number: "<<(int)interdesc->bInterfaceNumber<<" | ";
+55
+            cout<<"Number of endpoints: "<<(int)interdesc->bNumEndpoints<<" | ";
+56
+            for(int k=0; k<(int)interdesc->bNumEndpoints; k++) {
+57
+                epdesc = &interdesc->endpoint[k];
+58
+                cout<<"Descriptor Type: "<<(int)epdesc->bDescriptorType<<" | ";
+59
+                cout<<"EP Address: "<<(int)epdesc->bEndpointAddress<<" | ";
+60
+            }
+61
+        }*/
+
+
+    libusb_free_config_descriptor(config);
+  }
 }
 
 unsigned char *
@@ -350,7 +472,7 @@ int process_args(struct arg_state * args)
     {
       struct file_upload * f = args->files[i];
 
-      printf("File \'%s\' at 0x%08x, size %zu\n", 
+      log_info("Will load \'%s\' at 0x%08x with size of %zu bytes\n",
         f->basename, f->addr, f->size);
     }
   }
@@ -366,6 +488,10 @@ int process_args(struct arg_state * args)
     return ret;
   }
 
+  /* enable libusb debugging */
+  if(g_debug)
+    libusb_set_debug(ctx, LIBUSB_LOG_LEVEL_INFO);
+
   dev = omap_usb_open(ctx, args->vendor, args->product);
 
   if(!dev)
@@ -378,7 +504,7 @@ int process_args(struct arg_state * args)
       - retrieve ASIC ID
       - start peripheral boot
       - upload first file
-      - execute first file
+      - processor executes first file
    */
   if(!transfer_first_stage(dev, args))
   {
@@ -386,6 +512,9 @@ int process_args(struct arg_state * args)
         args->files[0]->basename);
     goto fail;
   }
+
+  if(g_verbose)
+    log_info("first stage successfully transfered\n");
 
   /* Note: this is a race between the target's processor getting X-loader 
    * running and our processor. If we fail to communicate with the X-loader, 
@@ -496,11 +625,17 @@ bool omap_usb_write(libusb_device_handle * handle, unsigned char * data,
 
     if(ret == LIBUSB_ERROR_TIMEOUT)
     {
-      numTimeouts++;
       sizeLeft -= actualWrite;
       iter += actualWrite;
 
-      /* build in some reliablity */
+      /* only count timeouts if nothing got done */
+      if(actualWrite == 0)
+      {
+        numTimeouts++;
+        log_info("WARNING: BULK_OUT transfer timed out. Progress %d/%d."
+            " Try %d/%d\n", iter, length, numTimeouts, USB_MAX_TIMEOUTS);
+      }
+
       if(numTimeouts > USB_MAX_TIMEOUTS)
       {
         log_error(
@@ -514,6 +649,9 @@ bool omap_usb_write(libusb_device_handle * handle, unsigned char * data,
       /* we cant trust actualWrite on anything but a timeout or success */
       sizeLeft -= actualWrite;
       iter += actualWrite;
+
+      /* reset the timeouts */
+      numTimeouts = 0;
     }
     else
     {
@@ -545,9 +683,24 @@ int transfer_first_stage(libusb_device_handle * handle, struct arg_state * args)
   /* read the ASIC ID */
   if(!omap_usb_read(handle, buffer, bufSize, &transLen))
   {
-    log_error("failed to read ASIC ID from USB connection. "
-        "Check your USB device!\n");
-    goto fail;
+    /* hack to try and kick the processor in to gear */
+    cmd = cpu_to_le32(OMAP_PERIPH_BOOT+1);
+
+    if(!omap_usb_write(handle, (unsigned char *)&cmd, sizeof(cmd)))
+    {
+      log_error("failed to read ASIC ID from USB connection. "
+          "Check your USB device!\n");
+      goto fail;
+    }
+    else
+    {
+      if(!omap_usb_read(handle, buffer, bufSize, &transLen))
+      {
+        log_error("failed to read ASIC ID from USB connection. "
+            "Check your USB device!\n");
+        goto fail;
+      }
+    }
   }
 
   if(transLen != OMAP_ASIC_ID_LEN)
@@ -598,12 +751,18 @@ int transfer_first_stage(libusb_device_handle * handle, struct arg_state * args)
     goto fail;
   }
 
+  if(g_debug)
+    log_debug("sent peripheral boot command %08x...\n", OMAP_PERIPH_BOOT);
+
   /* send the length of the first file (little endian) */
   if(!omap_usb_write(handle, (unsigned char *)&filelen, sizeof(filelen)))
   {
     log_error("failed to length specifier of %u to OMAP BootROM\n", filelen);
     goto fail;
   }
+
+  if(g_debug)
+    log_debug("sent length of \'%s\' (%u)...\n", file->basename, file->size);
 
   /* send the file! */
   if(!omap_usb_write(handle, file->data, file->size))
@@ -612,6 +771,9 @@ int transfer_first_stage(libusb_device_handle * handle, struct arg_state * args)
       file->basename, filelen);
     goto fail;
   }
+
+  if(g_debug)
+    log_debug("sent first-stage file \'%s\'\n", file->basename);
 
   free(buffer);
   return 1;
@@ -760,7 +922,7 @@ fail:
 
 /* getopt configuration */
 int do_version = 0;
-const char * const short_opt= "f:a:j:i:p:vh";
+const char * const short_opt= "f:a:j:i:p:vdh";
 const struct option long_opt[] = 
 {
   {"file",    1, NULL, 'f'},
@@ -769,6 +931,7 @@ const struct option long_opt[] =
   {"vendor",  1, NULL, 'i'},
   {"product", 1, NULL, 'p'},
   {"verbose", 0, NULL, 'v'},
+  {"debug",   0, NULL, 'd'},
   {"help",    0, NULL, 'h'},
   {"version", 0, &do_version, 1},
   {NULL,      0, NULL, 0  }
@@ -793,6 +956,7 @@ void usage(char * exe)
   printf("                  (default 0x%04x).\n", OMAP_PRODUCT_ID);
   printf("  -h, --help      Display this message.\n");
   printf("  -v, --verbose   Enable verbose output.\n");
+  printf("  -d, --debug     Enable debugging output.\n");
   printf("\n");
   printf("Description:\n");
   printf("  %s's basic usage is to upload an arbitrary file in to the memory\n",
@@ -857,6 +1021,15 @@ void log_info(char * fmt, ...)
   va_end(va);
 }
 
+void log_debug(char * fmt, ...)
+{
+  va_list va;
+  
+  va_start(va, fmt);
+  fprintf(stdout, "[D] ");
+  vfprintf(stdout, fmt, va);
+  va_end(va);
+}
 
 int main(int argc, char * argv[])
 {
@@ -967,6 +1140,9 @@ int main(int argc, char * argv[])
       break;
     case 'v':
       g_verbose++;
+      break;
+    case 'd':
+      g_debug++;
       break;
     case 'h':
       usage(exe);

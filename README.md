@@ -16,10 +16,47 @@ Build Requirements
 
 Building
 -------
-    ~/omap_usbload $ make
-    gcc -Wall -O2 -I/usr/include/libusb-1.0 -c omap_loader.c -o omap_loader.o
-    gcc  -o omap_loader omap_loader.o -lusb-1.0
-    ~/omap_usbload $ ./omap_loader --help
+```
+~/omap_usbload $ make
+gcc -Wall -O2 -I/usr/include/libusb-1.0 -c omap_loader.c -o omap_loader.o
+gcc  -o omap_loader omap_loader.o -lusb-1.0
+~/omap_usbload $ ./omap_loader --help
+```
+    
+Running
+-------
+```
+OMAP Loader 1.0.0
+Usage: ./omap_loader [options] -f first-stage [-f file -a addr]...
+Options:
+  -f, --file      Provide the filename of a binary file to be
+                  uploaded. The first file specified is uploaded to
+                  the fixed address 0x40200000 as defined by the manual.
+                  Additional files must be followed by an address
+                  argument (-a).
+  -a, --addr      The address to load the prior file at.
+  -j, --jump      Specify the address to jump to after loading all
+                  of the files in to memory.
+  -i, --vendor    Override the default vendor ID to poll for
+                  (default 0x0451).
+  -p, --product   Override the default product ID to poll for
+                  (default 0xd00e).
+  -h, --help      Display this message.
+  -v, --verbose   Enable verbose output.
+```
+
+Examples
+--------
+Uploading a compatible X-Loader, U-Boot, Kernel, and RAMDisk, then jumping
+to the U-Boot image for further bootloading:
+`./omap_loader -f x-load.bin -f u-boot.bin -a 0x80200000 -f uImage -a 0x80800000 \
+   -f uRamdisk -a 0x81000000 -j 0x80200000`
+   
+Uploading arbitrary code to be executed (doesn't have to be X-loader):
+`./omap_loader -f exec_me.bin`
+
+Trying to debug an upload issue using verbose output:
+`./omap_loader -v -f exec_me.bin -f file1.bin -a 0xdeadbeef -j 0xabad1dea`
 
 License
 -------

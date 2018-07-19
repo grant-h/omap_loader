@@ -1,4 +1,4 @@
-/* 
+/*
 OMAP Loader, a USB uploader application targeted at OMAP3 processors
 Copyright (C) 2008 Martin Mueller <martinmm@pfump.org>
 Copyright (C) 2014 Grant Hernandez <grant.h.hernandez@gmail.com>
@@ -23,9 +23,12 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include <stdint.h>
 #include <stdarg.h>
 #include <string.h>
-#include <stdbool.h>
 
-/* Reasons for the name change: this is a complete rewrite of 
+#define bool int
+#define false   0
+#define true    1
+
+/* Reasons for the name change: this is a complete rewrite of
    the unversioned omap3_usbload so to lower ambiguity the name was changed.
    The GPLv2 license specifies rewrites as derived work.
 */
@@ -40,10 +43,9 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 # include <arpa/inet.h>
 #endif
 
-#include <unistd.h> /* for usleep and friends */
-#include <getopt.h>
+#include <windows.h> /* for Sleep and friends */
+#include "getopt.h"
 #include <errno.h>
-#include <libgen.h> /* for basename */
 
 #include <libusb.h> /* the main event */
 
@@ -93,14 +95,13 @@ struct file_upload
   size_t size;
   unsigned char * data;
   uint32_t addr;
-  char * path;
-  char * basename;
+  char path[255];
 };
 
 /* stores all of the arguments read in by getopt in main() */
 struct arg_state
 {
-  struct file_upload ** files;
+  struct file_upload files[10];
   int numFiles;
   uint32_t jumpTarget;
   uint16_t vendor, product;
@@ -160,6 +161,8 @@ omap_usb_open(libusb_context * ctx, uint16_t vendor, uint16_t product)
   ssize_t count, i;
   int ret;
   bool found = false;
+  unsigned char * mfgStr;
+  unsigned char * prodStr;
 
   log_info("scanning for USB device matching %04hx:%04hx...\n",
       vendor, product);
@@ -201,12 +204,18 @@ omap_usb_open(libusb_context * ctx, uint16_t vendor, uint16_t product)
 
     /* nothing found yet. have a 10ms nap */
     if(!found)
-      usleep(10000);
+      Sleep(10);
   }
+  //==
+  if((ret = libusb_claim_interface(handle, 0)) < 0) {
+    log_error("failed to claim interface: %s\n", libusb_error_name(ret));
+    libusb_close(handle);
+  }
+  //==
 
   /* grab the manufacturer and product strings for printing */
-  unsigned char * mfgStr = omap_usb_get_string(handle, desc.iManufacturer);
-  unsigned char * prodStr = omap_usb_get_string(handle, desc.iProduct);
+  mfgStr = omap_usb_get_string(handle, desc.iManufacturer);
+  prodStr = omap_usb_get_string(handle, desc.iProduct);
 
   log_info("successfully opened %04hx:%04hx (", vendor, product);
 
@@ -273,6 +282,11 @@ omap_usb_get_string(libusb_device_handle * handle, uint8_t idx)
 
 unsigned char * read_file(char * path, size_t * readamt)
 {
+  unsigned char * data = NULL;
+  size_t allocSize = 0;
+  size_t iter = 0;
+  size_t readSize;
+  size_t ret;
   FILE * fp = fopen(path, "rb");
 
   if(!fp)
@@ -280,10 +294,6 @@ unsigned char * read_file(char * path, size_t * readamt)
     log_error("failed to open file \'%s\': %s\n", path, strerror(errno));
     return NULL;
   }
-
-  unsigned char * data = NULL;
-  size_t allocSize = 0;
-  size_t iter = 0;
 
   while(1)
   {
@@ -296,8 +306,8 @@ unsigned char * read_file(char * path, size_t * readamt)
         return NULL;
     }
 
-    size_t readSize = allocSize - iter;
-    size_t ret = fread(data+iter, sizeof(unsigned char), readSize, fp);
+    readSize = allocSize - iter;
+    ret = fread(data+iter, sizeof(unsigned char), readSize, fp);
 
     iter += ret;
 
@@ -327,6 +337,9 @@ unsigned char * read_file(char * path, size_t * readamt)
 int process_args(struct arg_state * args)
 {
   int i;
+  libusb_context * ctx;
+  libusb_device_handle * dev;
+  int ret;
 
   /* For each file, load it in to memory
    * TODO: defer this until transfer time (save memory and pipeline IO)
@@ -334,7 +347,7 @@ int process_args(struct arg_state * args)
 
   for(i = 0; i < args->numFiles; i++)
   {
-    struct file_upload * f = args->files[i];
+    struct file_upload * f = &args->files[i];
 
     f->data = read_file(f->path, &f->size);
 
@@ -348,16 +361,12 @@ int process_args(struct arg_state * args)
   {
     for(i = 0; i < args->numFiles; i++)
     {
-      struct file_upload * f = args->files[i];
+      struct file_upload * f = &args->files[i];
 
       printf("File \'%s\' at 0x%08x, size %zu\n", 
-        f->basename, f->addr, f->size);
+        f->path, f->addr, f->size);
     }
   }
-
-  libusb_context * ctx;
-  libusb_device_handle * dev;
-  int ret;
 
   if((ret = libusb_init(&ctx)) < 0)
   {
@@ -365,6 +374,8 @@ int process_args(struct arg_state * args)
         libusb_error_name(ret));
     return ret;
   }
+
+//  libusb_set_debug(ctx, LIBUSB_LOG_LEVEL_DEBUG);
 
   dev = omap_usb_open(ctx, args->vendor, args->product);
 
@@ -383,7 +394,7 @@ int process_args(struct arg_state * args)
   if(!transfer_first_stage(dev, args))
   {
     log_error("failed to transfer the first stage file \'%s\'\n",
-        args->files[0]->basename);
+        args->files[0].path);
     goto fail;
   }
 
@@ -393,7 +404,9 @@ int process_args(struct arg_state * args)
    * some stupid, arbitrary sleep value here. The transfer_other_files function
    * should be robust enough to handle some errors.
    */
-  
+
+   Sleep(500);
+
   /* If we are passed one file, assume that the user just wants to
      upload some initial code with no X-loader chaining
    */
@@ -410,11 +423,13 @@ int process_args(struct arg_state * args)
       (args->numFiles > 1) ? "files" : "file");
 
   /* safely close our USB handle and context */
+  libusb_release_interface(dev, 0);
   libusb_close(dev);
   libusb_exit(ctx);
   return 0;
 
 fail:
+  libusb_release_interface(dev, 0);
   libusb_close(dev);
   libusb_exit(ctx);
 
@@ -485,6 +500,13 @@ bool omap_usb_write(libusb_device_handle * handle, unsigned char * data,
   int numTimeouts = 0;
   int iter = 0;
   int sizeLeft = length;
+  int timeout_mult = 1;//1 sec per 1MB
+
+  if(length > 0x1000000)
+    timeout_mult = 50;
+  else
+      if(length > 0x100000)
+        timeout_mult = 10;
 
   while(sizeLeft > 0)
   {
@@ -492,7 +514,7 @@ bool omap_usb_write(libusb_device_handle * handle, unsigned char * data,
     int writeAmt = sizeLeft;
 
     ret = libusb_bulk_transfer(handle, OMAP_USB_BULK_OUT, data+iter,
-        writeAmt, &actualWrite, USB_TIMEOUT);
+        writeAmt, &actualWrite, USB_TIMEOUT*timeout_mult);
 
     if(ret == LIBUSB_ERROR_TIMEOUT)
     {
@@ -536,7 +558,7 @@ int transfer_first_stage(libusb_device_handle * handle, struct arg_state * args)
   int transLen = 0;
   int i;
 
-  struct file_upload * file = args->files[0];
+  struct file_upload * file = &args->files[0];
 
   /* TODO determine buffer size based on endpoint */
   buffer = calloc(bufSize, sizeof(unsigned char));
@@ -609,7 +631,7 @@ int transfer_first_stage(libusb_device_handle * handle, struct arg_state * args)
   if(!omap_usb_write(handle, file->data, file->size))
   {
     log_error("failed to send file \'%s\' (size %u)\n",
-      file->basename, filelen);
+      file->path, filelen);
     goto fail;
   }
 
@@ -629,6 +651,7 @@ int transfer_other_files(libusb_device_handle * handle, struct arg_state * args)
   int maxFailures = 3;
   int transLen = 0;
   int curFile = 1; /* skip the first file */
+  int ret=0;
 
   buffer = calloc(bufSize, sizeof(unsigned char));
 
@@ -637,7 +660,7 @@ int transfer_other_files(libusb_device_handle * handle, struct arg_state * args)
   {
     uint32_t opcode = 0;
     uint8_t * extra = NULL;
-    struct file_upload * f = args->files[curFile];
+    struct file_upload * f = &args->files[curFile];
 
     /* read the opcode from xloader ID */
     if(!omap_usb_read(handle, (unsigned char *)buffer, bufSize, &transLen))
@@ -650,9 +673,9 @@ int transfer_other_files(libusb_device_handle * handle, struct arg_state * args)
         goto fail;
       }
 
-      /* sleep a bit */
-      usleep(2000*1000); /* 2s */
-      continue; /* try the opcode read again */
+      // sleep a bit
+      Sleep(2000); // 2s
+      continue; // try the opcode read again
     }
 
     if(transLen < 8)
@@ -661,9 +684,10 @@ int transfer_other_files(libusb_device_handle * handle, struct arg_state * args)
       goto fail;
     }
 
-    /* extract the opcode and extra data pointer */
+    // extract the opcode and extra data pointer
     opcode = le32_to_cpu(buffer[0]);
     extra = (uint8_t *)buffer;
+
 
     switch(opcode)
     {
@@ -683,7 +707,7 @@ int transfer_other_files(libusb_device_handle * handle, struct arg_state * args)
       if(g_verbose)
       {
         log_info("uploading \'%s\' (size %zu) to 0x%08x\n",
-            f->basename, f->size, f->addr);
+            f->path, f->size, f->addr);
       }
       break;
     /* X-loader confirms the size to recieve */
@@ -692,7 +716,7 @@ int transfer_other_files(libusb_device_handle * handle, struct arg_state * args)
       {
         log_error("X-loader failed to recieve the right file size for "
             "file \'%s\' (got %u, expected %zu)\n",
-            f->basename, buffer[1], f->size);
+            f->path, buffer[1], f->size);
         goto fail;
       }
 
@@ -700,7 +724,7 @@ int transfer_other_files(libusb_device_handle * handle, struct arg_state * args)
 
       if(!omap_usb_write(handle, f->data, f->size))
       {
-        log_error("failed to send file \'%s\' to the X-loader\n", f->basename);
+        log_error("failed to send file \'%s\' to the X-loader\n", f->path);
         goto fail;
       }
       break;
@@ -710,7 +734,7 @@ int transfer_other_files(libusb_device_handle * handle, struct arg_state * args)
       {
         log_error("X-loader failed to recieve the right amount of data for "
             "file \'%s\' (got %u, expected %zu)\n",
-            f->basename, buffer[1], f->size);
+            f->path, buffer[1], f->size);
         goto fail;
       }
 
@@ -870,7 +894,7 @@ int main(int argc, char * argv[])
   struct file_upload file;
   /* total arg state */
   struct arg_state * args = calloc(1, sizeof(*args));
-  
+
   if(argc < 1)
   {
     log_error("invalid arguments (no argv[0])\n");
@@ -899,19 +923,12 @@ int main(int argc, char * argv[])
     {
       if(gotFile)
       {
-        log_error("missing address argument (-a) for file \'%s\'\n",
-          file.path);
+        log_error("missing address argument (-a) for file \'%s\'\n", file.path);
         usage(exe);
         return 1;
       }
 
-      file.path = strdup(optarg);
-
-      /* necessary to be sure that we own all the memory
-         and that the path input can be modified */
-      char * tmpPath = strdup(file.path);
-      file.basename = strdup(basename(tmpPath));
-      free(tmpPath);
+      strcpy(file.path, optarg);
 
       fileCount++;
 
@@ -922,10 +939,8 @@ int main(int argc, char * argv[])
         file.addr = OMAP_BASE_ADDRESS;
 
         /* commit the file object with the processor specified base address */
-        args->files = realloc(args->files, fileCount);
         args->numFiles = fileCount;
-        args->files[fileCount-1] = malloc(sizeof(file));
-        memcpy(args->files[fileCount-1], &file, sizeof(file));
+        memcpy(&args->files[fileCount-1], &file, sizeof(file));
       }
       else
       {
@@ -948,10 +963,8 @@ int main(int argc, char * argv[])
       file.addr = strtoul(optarg, NULL, 0);
 
       /* commit the file object */
-      args->files = realloc(args->files, fileCount);
       args->numFiles = fileCount;
-      args->files[fileCount-1] = malloc(sizeof(file));
-      memcpy(args->files[fileCount-1], &file, sizeof(file));
+      memcpy(&args->files[fileCount-1], &file, sizeof(file));
 
       gotFile = false;
       break;
@@ -1000,8 +1013,8 @@ int main(int argc, char * argv[])
   {
     log_info("WARNING: no jump target specified. Defaulting to the first "
         "file's (\'%s\') address 0x%08x\n", 
-        args->files[1]->basename, args->files[1]->addr);
-    args->jumpTarget = args->files[1]->addr;
+        args->files[1].path, args->files[1].addr);
+    args->jumpTarget = args->files[1].addr;
   }
 
   return process_args(args);

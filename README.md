@@ -14,6 +14,8 @@ Build Requirements
 * GNU Make
 * libUSB 1.0.X or higher
 
+To install the required libusb version on Ubuntu or Debian run `sudo apt-get install libusb-1.0`
+
 Building
 -------
 ```
@@ -57,6 +59,10 @@ Uploading arbitrary code to be executed (doesn't have to be X-loader):
 
 Trying to debug an upload issue using verbose output:
 `./omap_loader -v -f exec_me.bin -f file1.bin -a 0xdeadbeef -j 0xabad1dea`
+
+Support
+-------
+If you experience any difficulties in building or using this project, please search through the open issues or open a new one describing your problem. Currently, the maintainer \[me\] does not own a USBLOAD compatible device. This means any device testing is impossible on my end.
 
 License
 -------
